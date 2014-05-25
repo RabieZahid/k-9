@@ -9,21 +9,29 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Process;
+import android.support.v4.app.DialogFragment;
 import android.util.Log;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
 import android.widget.ProgressBar;
 import android.widget.TextView;
+
 import com.fsck.k9.*;
 import com.fsck.k9.activity.K9Activity;
 import com.fsck.k9.controller.MessagingController;
+import com.fsck.k9.fragment.ConfirmationDialogFragment;
+import com.fsck.k9.fragment.ConfirmationDialogFragment.ConfirmationDialogFragmentListener;
 import com.fsck.k9.mail.AuthenticationFailedException;
 import com.fsck.k9.mail.CertificateValidationException;
+import com.fsck.k9.mail.ClientCertificateAliasRequiredException;
+import com.fsck.k9.mail.ClientCertificateRequiredException;
 import com.fsck.k9.mail.Store;
 import com.fsck.k9.mail.Transport;
 import com.fsck.k9.mail.store.WebDavStore;
 import com.fsck.k9.mail.filter.Hex;
+import com.fsck.k9.net.ssl.SslHelper;
+import com.fsck.k9.security.KeyChainKeyManager;
 
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateEncodingException;
@@ -32,21 +40,27 @@ import java.security.NoSuchAlgorithmException;
 import java.security.MessageDigest;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Checks the given settings to make sure that they can be used to send and
  * receive mail.
- *
+ * 
  * XXX NOTE: The manifest for this app has it ignore config changes, because
  * it doesn't correctly deal with restarting while its thread is running.
  */
-public class AccountSetupCheckSettings extends K9Activity implements OnClickListener {
+public class AccountSetupCheckSettings extends K9Activity implements OnClickListener,
+        ConfirmationDialogFragmentListener{
 
     public static final int ACTIVITY_REQUEST_CODE = 1;
 
     private static final String EXTRA_ACCOUNT = "account";
 
     private static final String EXTRA_CHECK_DIRECTION ="checkDirection";
+
+    private static final String EXTRA_PROMT_FOR_CLIENT_CERTIFICATE = "promtForClientCertificate";
+
+    private static final String EXTRA_CLIENT_CERTIFICATE_SET = "clientCertificateSet";
 
     public enum CheckDirection {
         INCOMING,
@@ -61,16 +75,30 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
 
     private Account mAccount;
 
+    private boolean mPromptForClientCertificate;
+
+    private boolean mIsClientCertSet;
+
     private CheckDirection mDirection;
 
     private boolean mCanceled;
 
     private boolean mDestroyed;
 
-    public static void actionCheckSettings(Activity context, Account account, CheckDirection direction) {
+    public static void actionCheckSettings(Activity context, Account account,
+            CheckDirection direction,
+            boolean promptForClientCertificate) {
+        actionCheckSettings(context, account, direction, promptForClientCertificate, false);
+    }
+
+    private static void actionCheckSettings(Activity context, Account account,
+            CheckDirection direction,
+            boolean promptForClientCertificate, boolean clientCertificateSet) {
         Intent i = new Intent(context, AccountSetupCheckSettings.class);
         i.putExtra(EXTRA_ACCOUNT, account.getUuid());
         i.putExtra(EXTRA_CHECK_DIRECTION, direction);
+        i.putExtra(EXTRA_PROMT_FOR_CLIENT_CERTIFICATE, promptForClientCertificate);
+        i.putExtra(EXTRA_CLIENT_CERTIFICATE_SET, clientCertificateSet);
         context.startActivityForResult(i, ACTIVITY_REQUEST_CODE);
     }
 
@@ -89,12 +117,24 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
         mAccount = Preferences.getPreferences(this).getAccount(accountUuid);
         mDirection = (CheckDirection) getIntent().getSerializableExtra(EXTRA_CHECK_DIRECTION);
 
+        mPromptForClientCertificate = getIntent().getBooleanExtra(EXTRA_PROMT_FOR_CLIENT_CERTIFICATE, false);
+        mIsClientCertSet = getIntent().getBooleanExtra(EXTRA_CLIENT_CERTIFICATE_SET, false);
+
         new Thread() {
             @Override
             public void run() {
                 Store store = null;
                 Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
                 try {
+                    if (mPromptForClientCertificate) {
+                        if (K9.DEBUG)
+                            Log.d(K9.LOG_TAG, "AccountSetupCheckSettings will prompt for client certificate");
+                        SslHelper.setInteractiveClientCertificateAliasSelectionRequired(true);
+                    } else {
+                        if (K9.DEBUG)
+                            Log.d(K9.LOG_TAG, "AccountSetupCheckSettings will NOT prompt for client certificate");
+                    }
+
                     if (mDestroyed) {
                         return;
                     }
@@ -108,7 +148,9 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                             mAccount, mDirection);
 
                     if (mDirection.equals(CheckDirection.INCOMING)) {
-                        store = mAccount.getRemoteStore();
+                        // refresh URI that stores settings in order to include
+                        // client certificate set by user
+                        store = mAccount.getRemoteStore(mIsClientCertSet);
 
                         if (store instanceof WebDavStore) {
                             setMessage(R.string.account_setup_check_settings_authenticate);
@@ -154,30 +196,117 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                         R.string.account_setup_failed_dlg_auth_message_fmt,
                         afe.getMessage() == null ? "" : afe.getMessage());
                 } catch (final CertificateValidationException cve) {
-                    Log.e(K9.LOG_TAG, "Error while testing settings", cve);
-
-                    X509Certificate[] chain = cve.getCertChain();
-                    // Avoid NullPointerException in acceptKeyDialog()
-                    if (chain != null) {
-                        acceptKeyDialog(
-                                R.string.account_setup_failed_dlg_certificate_message_fmt,
-                                cve);
-                    } else {
-                        showErrorDialog(
-                                R.string.account_setup_failed_dlg_server_message_fmt,
-                                (cve.getMessage() == null ? "" : cve.getMessage()));
-                    }
+                    handleCertificateValidationException(cve);
+                } catch (final ClientCertificateRequiredException e) {
+                    handleClientCertificateRequiredException(e);
+                } catch (final ClientCertificateAliasRequiredException ccr) {
+                    handleClientCertificateAliasRequiredException(ccr);
                 } catch (final Throwable t) {
                     Log.e(K9.LOG_TAG, "Error while testing settings", t);
                     showErrorDialog(
                         R.string.account_setup_failed_dlg_server_message_fmt,
                         (t.getMessage() == null ? "" : t.getMessage()));
-
+                } finally {
+                    SslHelper.setInteractiveClientCertificateAliasSelectionRequired(false);
                 }
             }
 
         }
         .start();
+    }
+
+    private void handleCertificateValidationException(CertificateValidationException cve) {
+        Log.e(K9.LOG_TAG, "Error while testing settings", cve);
+
+        X509Certificate[] chain = cve.getCertChain();
+        // Avoid NullPointerException in acceptKeyDialog()
+        if (chain != null) {
+            acceptKeyDialog(
+                    R.string.account_setup_failed_dlg_certificate_message_fmt,
+                    cve);
+        } else {
+            showErrorDialog(
+                    R.string.account_setup_failed_dlg_server_message_fmt,
+                    (cve.getMessage() == null ? "" : cve.getMessage()));
+        }
+    }
+
+    private void handleClientCertificateRequiredException(ClientCertificateRequiredException e) {
+        /* 
+         * If the KeyChain API is not available on this Android
+         * version, inform user about this and go on with
+         * CertificateValidationException in doNegativeClick
+         */
+        if (!SslHelper.isClientCertificateSupportAvailable()) {
+            mHandler.post(new Runnable() {
+                public void run() {
+                    showDialogFragment(R.id.dialog_client_certificate_not_available);
+                }
+            });
+
+            // abort
+            return;
+        }
+
+
+        if (mPromptForClientCertificate) {
+            // there are no certs if we are back here - suggest installing new certs
+            mHandler.post(new Runnable() {
+                public void run() {
+                    showDialogFragment(R.id.dialog_client_certificate_no_certs);
+                }
+            });
+        } else {
+            /* 
+             * ask if user want to pick a client certificate - if not then
+             * just go with CertificateValidationException block as always
+             * before
+             */
+            mHandler.post(new Runnable() {
+                public void run() {
+                    if (mIsClientCertSet) {
+                        // client already set certificate and we still can't log in
+                        showDialogFragment(R.id.dialog_client_certificate_select_cert_error);
+                    } else {
+                        showDialogFragment(R.id.dialog_client_certificate_select_cert);
+                    }
+                }
+            });
+        }
+    }
+
+    private void handleClientCertificateAliasRequiredException(ClientCertificateAliasRequiredException ccr) {
+        if (K9.DEBUG)
+            Log.d(K9.LOG_TAG, "Client certificate required: " + ccr.getMessage());
+
+        String alias = mAccount.getClientCertificateAlias();
+
+        alias = KeyChainKeyManager.interactivelyChooseClientCertificateAlias(
+                AccountSetupCheckSettings.this,
+                ccr.getKeyTypes(),
+                ccr.getIssuers(),
+                ccr.getHostName(),
+                ccr.getPort(),
+                alias);
+
+        // save client certificate alias
+        if (alias != null) {
+            if (mDirection.equals(CheckDirection.INCOMING)) {
+                if (K9.DEBUG)
+                    Log.d(K9.LOG_TAG, "Setting store client certificate alias to: " + alias);
+                mAccount.setClientCertificateAlias(alias);
+            } else if (mDirection.equals(CheckDirection.OUTGOING)) {
+                if (K9.DEBUG)
+                    Log.d(K9.LOG_TAG, "Setting transport client certificate alias to: " + alias);
+                mAccount.setClientCertificateAlias(alias);
+            }
+
+            // don't ask for client certificate anymore
+            AccountSetupCheckSettings.actionCheckSettings(AccountSetupCheckSettings.this, mAccount,
+                    mDirection, false, true);
+        } else {
+            showErrorDialog(R.string.account_setup_failed_dlg_ccert_required);
+        }
     }
 
     @Override
@@ -205,34 +334,12 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                     return;
                 }
                 mProgressBar.setIndeterminate(false);
-                new AlertDialog.Builder(AccountSetupCheckSettings.this)
-                .setTitle(getString(R.string.account_setup_failed_dlg_title))
-                .setMessage(getString(msgResId, args))
-                .setCancelable(true)
-                .setNegativeButton(
-                    getString(R.string.account_setup_failed_dlg_continue_action),
-
-                new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface dialog, int which) {
-                        mCanceled = false;
-                        setResult(RESULT_OK);
-                        finish();
-                    }
-                })
-                .setPositiveButton(
-                    getString(R.string.account_setup_failed_dlg_edit_details_action),
-                new DialogInterface.OnClickListener() {
-                    public void onClick(DialogInterface dialog, int which) {
-                        finish();
-                    }
-                })
-                .show();
+                showDialogFragment(R.id.dialog_account_setup_error, getString(msgResId, args));
             }
         });
     }
 
-    private void acceptKeyDialog(final int msgResId,
-            final CertificateValidationException ex) {
+    private void acceptKeyDialog(final int msgResId, final CertificateValidationException ex) {
         mHandler.post(new Runnable() {
             public void run() {
                 if (mDestroyed) {
@@ -351,6 +458,8 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                     }
                 }
 
+                // TODO: refactor with DialogFragment.
+                // This is difficult because we need to pass through chain[0] for onClick()
                 new AlertDialog.Builder(AccountSetupCheckSettings.this)
                 .setTitle(getString(R.string.account_setup_failed_dlg_invalid_certificate_title))
                 //.setMessage(getString(R.string.account_setup_failed_dlg_invalid_certificate)
@@ -362,15 +471,7 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                     getString(R.string.account_setup_failed_dlg_invalid_certificate_accept),
                 new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface dialog, int which) {
-                        try {
-                            mAccount.addCertificate(mDirection, chain[0]);
-                        } catch (CertificateException e) {
-                            showErrorDialog(
-                                R.string.account_setup_failed_dlg_certificate_message_fmt,
-                                e.getMessage() == null ? "" : e.getMessage());
-                        }
-                        AccountSetupCheckSettings.actionCheckSettings(AccountSetupCheckSettings.this, mAccount,
-                                mDirection);
+                        acceptCertificate(chain[0]);
                     }
                 })
                 .setNegativeButton(
@@ -385,12 +486,29 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
         });
     }
 
+    /**
+     * Permanently accepts a certificate for the INCOMING or OUTGOING direction
+     * by adding it to the local key store.
+     * 
+     * @param certificate
+     */
+    private void acceptCertificate(X509Certificate certificate) {
+        try {
+            mAccount.addCertificate(mDirection, certificate);
+        } catch (CertificateException e) {
+            showErrorDialog(
+                    R.string.account_setup_failed_dlg_certificate_message_fmt,
+                    e.getMessage() == null ? "" : e.getMessage());
+        }
+        AccountSetupCheckSettings.actionCheckSettings(AccountSetupCheckSettings.this, mAccount,
+                mDirection, mPromptForClientCertificate);
+    }
+
     @Override
     public void onActivityResult(int reqCode, int resCode, Intent data) {
         setResult(resCode);
         finish();
     }
-
 
     private void onCancel() {
         mCanceled = true;
@@ -403,5 +521,112 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
             onCancel();
             break;
         }
+    }
+
+    private void showDialogFragment(int dialogId) {
+        showDialogFragment(dialogId, null);
+    }
+
+    private void showDialogFragment(int dialogId, String customMessage) {
+        DialogFragment fragment;
+        switch (dialogId) {
+            case R.id.dialog_account_setup_error: {
+                fragment = ConfirmationDialogFragment.newInstance(dialogId,
+                        getString(R.string.account_setup_failed_dlg_title),
+                        customMessage,
+                        getString(R.string.account_setup_failed_dlg_edit_details_action),
+                        getString(R.string.account_setup_failed_dlg_continue_action)
+                );
+                break;
+            }
+            case R.id.dialog_client_certificate_not_available: {
+                fragment = ConfirmationDialogFragment.newInstance(dialogId,
+                        getString(R.string.dialog_client_certificate_title),
+                        getString(R.string.dialog_client_certificate_not_available),
+                        getString(android.R.string.ok)
+                );
+                break;
+            }
+            case R.id.dialog_client_certificate_no_certs: {
+                fragment = ConfirmationDialogFragment.newInstance(dialogId,
+                        getString(R.string.dialog_client_certificate_title),
+                        getString(R.string.dialog_client_certificate_no_certs),
+                        getString(android.R.string.ok),
+                        getString(android.R.string.cancel)
+                );
+                break;
+            }
+            case R.id.dialog_client_certificate_select_cert: {
+                fragment = ConfirmationDialogFragment.newInstance(dialogId,
+                        getString(R.string.dialog_client_certificate_title),
+                        getString(R.string.dialog_client_certificate_select_cert),
+                        getString(android.R.string.ok),
+                        getString(android.R.string.cancel)
+                );
+                break;
+            }
+            case R.id.dialog_client_certificate_select_cert_error: {
+                fragment = ConfirmationDialogFragment.newInstance(dialogId,
+                        getString(R.string.dialog_client_certificate_title),
+                        getString(R.string.dialog_client_certificate_select_cert_error),
+                        getString(android.R.string.ok),
+                        getString(android.R.string.cancel)
+                );
+                break;
+            }
+            default: {
+                throw new RuntimeException("Called showDialog(int) with unknown dialog id.");
+            }
+        }
+
+        fragment.show(getSupportFragmentManager(), getDialogTag(dialogId));
+    }
+
+    private String getDialogTag(int dialogId) {
+        return String.format(Locale.US, "dialog-%d", dialogId);
+    }
+
+    @Override
+    public void doPositiveClick(int dialogId) {
+        switch (dialogId) {
+            case R.id.dialog_account_setup_error: {
+                finish();
+                break;
+            }
+            case R.id.dialog_client_certificate_no_certs: {
+                // redirect user to security settings
+                startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS));
+                finish();
+                break;
+            }
+            case R.id.dialog_client_certificate_select_cert:
+            case R.id.dialog_client_certificate_select_cert_error: {
+                // TODO: test this!
+                AccountSetupCheckSettings.actionCheckSettings(
+                        AccountSetupCheckSettings.this, mAccount, mDirection, true);
+                break;
+               }
+        }
+    }
+
+    @Override
+    public void doNegativeClick(int dialogId) {
+        switch (dialogId) {
+            case R.id.dialog_account_setup_error:
+            case R.id.dialog_client_certificate_not_available:
+            case R.id.dialog_client_certificate_no_certs:
+            case R.id.dialog_client_certificate_select_cert:
+            case R.id.dialog_client_certificate_select_cert_error: {
+                mCanceled = false;
+                setResult(RESULT_OK);
+                finish();
+                break;
+            }
+        }
+    }
+
+    @Override
+    public void dialogCancelled(int dialogId) {
+        // nothing to do here...
     }
 }

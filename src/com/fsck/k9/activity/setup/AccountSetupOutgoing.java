@@ -13,6 +13,7 @@ import android.view.View.OnClickListener;
 import android.view.ViewGroup;
 import android.widget.*;
 import android.widget.CompoundButton.OnCheckedChangeListener;
+
 import com.fsck.k9.*;
 import com.fsck.k9.activity.K9Activity;
 import com.fsck.k9.activity.setup.AccountSetupCheckSettings.CheckDirection;
@@ -22,6 +23,7 @@ import com.fsck.k9.mail.ConnectionSecurity;
 import com.fsck.k9.mail.ServerSettings;
 import com.fsck.k9.mail.Transport;
 import com.fsck.k9.mail.transport.SmtpTransport;
+import com.fsck.k9.net.ssl.SslHelper;
 
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -37,6 +39,7 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
 
     private EditText mUsernameView;
     private EditText mPasswordView;
+    private TextView mPasswordViewLabel;
     private EditText mServerView;
     private EditText mPortView;
     private CheckBox mRequireLoginView;
@@ -77,7 +80,7 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
         try {
             if (new URI(mAccount.getStoreUri()).getScheme().startsWith("webdav")) {
                 mAccount.setTransportUri(mAccount.getStoreUri());
-                AccountSetupCheckSettings.actionCheckSettings(this, mAccount, CheckDirection.OUTGOING);
+                AccountSetupCheckSettings.actionCheckSettings(this, mAccount, CheckDirection.OUTGOING, false);
             }
         } catch (URISyntaxException e) {
             // TODO Auto-generated catch block
@@ -87,6 +90,7 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
 
         mUsernameView = (EditText)findViewById(R.id.account_username);
         mPasswordView = (EditText)findViewById(R.id.account_password);
+        mPasswordViewLabel = (TextView)findViewById(R.id.account_password_label);
         mServerView = (EditText)findViewById(R.id.account_server);
         mPortView = (EditText)findViewById(R.id.account_port);
         mRequireLoginView = (CheckBox)findViewById(R.id.account_require_login);
@@ -98,29 +102,11 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
         mNextButton.setOnClickListener(this);
         mRequireLoginView.setOnCheckedChangeListener(this);
 
-        ArrayAdapter<ConnectionSecurity> securityTypesAdapter = new ArrayAdapter<ConnectionSecurity>(this,
-                android.R.layout.simple_spinner_item, ConnectionSecurity.values());
-        securityTypesAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        mSecurityTypeView.setAdapter(securityTypesAdapter);
+        mSecurityTypeView.setAdapter(ConnectionSecurity.getArrayAdapter(this));
 
-        mAuthTypeAdapter = AuthType.getArrayAdapter(this);
+        mAuthTypeAdapter = AuthType.getArrayAdapter(this, SslHelper.isClientCertificateSupportAvailable());
         mAuthTypeView.setAdapter(mAuthTypeAdapter);
 
-        /*
-         * Calls validateFields() which enables or disables the Next button
-         * based on the fields' validity.
-         */
-        TextWatcher validationTextWatcher = new TextWatcher() {
-            public void afterTextChanged(Editable s) {
-                validateFields();
-            }
-
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
-            }
-
-            public void onTextChanged(CharSequence s, int start, int before, int count) {
-            }
-        };
         mUsernameView.addTextChangedListener(validationTextWatcher);
         mPasswordView.addTextChangedListener(validationTextWatcher);
         mServerView.addTextChangedListener(validationTextWatcher);
@@ -181,7 +167,20 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
                 @Override
                 public void onItemSelected(AdapterView<?> parent, View view, int position,
                         long id) {
+                    // this indirectly triggers validateFields because the port text is watched
                     updatePortFromSecurityType();
+                }
+
+                @Override
+                public void onNothingSelected(AdapterView<?> parent) { /* unused */ }
+            });
+
+            mAuthTypeView.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(AdapterView<?> parent, View view, int position,
+                        long id) {
+                    // shows/hides password field for client certificate authentication
+                    validateFields();
                 }
 
                 @Override
@@ -215,13 +214,38 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
     }
 
     private void validateFields() {
+        AuthType authType = (AuthType) mAuthTypeView.getSelectedItem();
+        boolean isAuthTypeExternal = AuthType.EXTERNAL.equals(authType);
+
+        // if user wants to user external authentication only, then we need to
+        // hide password field, since it won't be used
+        if (isAuthTypeExternal) {
+            // clear password field
+            mPasswordView.removeTextChangedListener(validationTextWatcher);
+            mPasswordView.setText("");
+            mPasswordView.addTextChangedListener(validationTextWatcher);
+
+            // hide password fields
+            mPasswordView.setVisibility(View.GONE);
+            mPasswordViewLabel.setVisibility(View.GONE);
+        } else {
+            // show password fields
+            mPasswordView.setVisibility(View.VISIBLE);
+            mPasswordViewLabel.setVisibility(View.VISIBLE);
+        }
+
+        ConnectionSecurity connectionSecurity = (ConnectionSecurity) mSecurityTypeView.getSelectedItem();
+        boolean hasConnectionSecurity = (!connectionSecurity.equals(ConnectionSecurity.NONE));
+
         mNextButton
-        .setEnabled(
-            Utility.domainFieldValid(mServerView) &&
-            Utility.requiredFieldValid(mPortView) &&
-            (!mRequireLoginView.isChecked() ||
-             (Utility.requiredFieldValid(mUsernameView) &&
-              Utility.requiredFieldValid(mPasswordView))));
+        .setEnabled(Utility.domainFieldValid(mServerView)
+                    && Utility.requiredFieldValid(mPortView)
+                    && (!mRequireLoginView.isChecked()
+                       || (Utility.requiredFieldValid(mUsernameView) && Utility.requiredFieldValid(mPasswordView))
+                       || (Utility.requiredFieldValid(mUsernameView) && isAuthTypeExternal)
+                       )
+                    && (!isAuthTypeExternal || hasConnectionSecurity)
+                   );
         Utility.setCompoundDrawablesAlpha(mNextButton, mNextButton.isEnabled() ? 255 : 128);
     }
 
@@ -290,7 +314,7 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
         uri = Transport.createTransportUri(server);
         mAccount.deleteCertificate(newHost, newPort, CheckDirection.OUTGOING);
         mAccount.setTransportUri(uri);
-        AccountSetupCheckSettings.actionCheckSettings(this, mAccount, CheckDirection.OUTGOING);
+        AccountSetupCheckSettings.actionCheckSettings(this, mAccount, CheckDirection.OUTGOING, false);
     }
 
     public void onClick(View v) {
@@ -312,4 +336,20 @@ public class AccountSetupOutgoing extends K9Activity implements OnClickListener,
         Toast toast = Toast.makeText(getApplication(), toastText, Toast.LENGTH_LONG);
         toast.show();
     }
+
+    /*
+     * Calls validateFields() which enables or disables the Next button
+     * based on the fields' validity.
+     */
+    TextWatcher validationTextWatcher = new TextWatcher() {
+        public void afterTextChanged(Editable s) {
+            validateFields();
+        }
+
+        public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+        }
+
+        public void onTextChanged(CharSequence s, int start, int before, int count) {
+        }
+    };
 }
