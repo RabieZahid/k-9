@@ -234,8 +234,7 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
     private void handleClientCertificateRequiredException(ClientCertificateRequiredException e) {
         /* 
          * If the KeyChain API is not available on this Android
-         * version, inform user about this and go on with
-         * CertificateValidationException in doNegativeClick
+         * version, inform user and abort
          */
         if (!SslHelper.isClientCertificateSupportAvailable()) {
             mHandler.post(new Runnable() {
@@ -258,9 +257,8 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
             });
         } else {
             /* 
-             * ask if user want to pick a client certificate - if not then
-             * just go with CertificateValidationException block as always
-             * before
+             * Ask if user want to pick a client certificate - if not then
+             * abort
              */
             mHandler.post(new Runnable() {
                 public void run() {
@@ -323,18 +321,6 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
                     return;
                 }
                 mMessageView.setText(getString(resId));
-            }
-        });
-    }
-
-    private void showErrorDialog(final int msgResId, final Object... args) {
-        mHandler.post(new Runnable() {
-            public void run() {
-                if (mDestroyed) {
-                    return;
-                }
-                mProgressBar.setIndeterminate(false);
-                showDialogFragment(R.id.dialog_account_setup_error, getString(msgResId, args));
             }
         });
     }
@@ -523,11 +509,24 @@ public class AccountSetupCheckSettings extends K9Activity implements OnClickList
         }
     }
 
+    private void showErrorDialog(final int msgResId, final Object... args) {
+        mHandler.post(new Runnable() {
+            public void run() {
+                showDialogFragment(R.id.dialog_account_setup_error, getString(msgResId, args));
+            }
+        });
+    }
+
     private void showDialogFragment(int dialogId) {
         showDialogFragment(dialogId, null);
     }
 
     private void showDialogFragment(int dialogId, String customMessage) {
+        if (mDestroyed) {
+            return;
+        }
+        mProgressBar.setIndeterminate(false);
+
         DialogFragment fragment;
         switch (dialogId) {
             case R.id.dialog_account_setup_error: {
