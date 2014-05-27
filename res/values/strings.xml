@@ -1120,6 +1120,7 @@ Please submit bug reports, contribute new features and ask questions at
     <!-- === TLS Client Certificate authentication specific ================================================================== -->
     <string name="account_setup_use_ccert_label">Use Client Certificate Authentication</string>
     <string name="account_setup_failed_dlg_ccert_required">Current settings require a valid client certificate to be selected.</string>
+    <string name="account_setup_basics_client_certificate">Use Client Certificate</string>
 
     <string name="dialog_client_certificate_title">Client Certificate Authentication</string>
     <string name="dialog_client_certificate_no_certs">You don\'t have any valid client certificates.\nDo you want to install any?</string>

@@ -14,11 +14,16 @@ import android.util.Log;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.CompoundButton.OnCheckedChangeListener;
 import android.widget.EditText;
+
 import com.fsck.k9.*;
 import com.fsck.k9.activity.K9Activity;
 import com.fsck.k9.activity.setup.AccountSetupCheckSettings.CheckDirection;
 import com.fsck.k9.helper.Utility;
+
 import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
@@ -34,7 +39,7 @@ import java.util.Locale;
  * AccountSetupAccountType activity.
  */
 public class AccountSetupBasics extends K9Activity
-    implements OnClickListener, TextWatcher {
+    implements OnClickListener, TextWatcher, OnCheckedChangeListener {
     private final static String EXTRA_ACCOUNT = "com.fsck.k9.AccountSetupBasics.account";
     private final static int DIALOG_NOTE = 1;
     private final static String STATE_KEY_PROVIDER =
@@ -44,6 +49,7 @@ public class AccountSetupBasics extends K9Activity
 
     private EditText mEmailView;
     private EditText mPasswordView;
+    private CheckBox mClientCertificateCheckBox;
     private Button mNextButton;
     private Button mManualSetupButton;
     private Account mAccount;
@@ -63,6 +69,7 @@ public class AccountSetupBasics extends K9Activity
         setContentView(R.layout.account_setup_basics);
         mEmailView = (EditText)findViewById(R.id.account_email);
         mPasswordView = (EditText)findViewById(R.id.account_password);
+        mClientCertificateCheckBox = (CheckBox)findViewById(R.id.account_client_certificate);
         mNextButton = (Button)findViewById(R.id.next);
         mManualSetupButton = (Button)findViewById(R.id.manual_setup);
 
@@ -71,6 +78,7 @@ public class AccountSetupBasics extends K9Activity
 
         mEmailView.addTextChangedListener(this);
         mPasswordView.addTextChangedListener(this);
+        mClientCertificateCheckBox.setOnCheckedChangeListener(this);
     }
 
     @Override
@@ -118,9 +126,23 @@ public class AccountSetupBasics extends K9Activity
     }
 
     private void validateFields() {
+        boolean useClientCertificate = mClientCertificateCheckBox.isChecked();
+        if (useClientCertificate) {
+            // clear password field
+            mPasswordView.removeTextChangedListener(this);
+            mPasswordView.setText("");
+            mPasswordView.addTextChangedListener(this);
+
+            // hide password fields
+            mPasswordView.setVisibility(View.GONE);
+        } else {
+            // show password fields
+            mPasswordView.setVisibility(View.VISIBLE);
+        }
+
         String email = mEmailView.getText().toString();
         boolean valid = Utility.requiredFieldValid(mEmailView)
-                        && Utility.requiredFieldValid(mPasswordView)
+                        && (Utility.requiredFieldValid(mPasswordView) || useClientCertificate)
                         && mEmailValidator.isValidAddressOnly(email);
 
         mNextButton.setEnabled(valid);
@@ -429,5 +451,13 @@ public class AccountSetupBasics extends K9Activity
         public String outgoingUsernameTemplate;
 
         public String note;
+    }
+
+    /**
+     * Called when checking the client certificate CheckBox
+     */
+    @Override
+    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+        validateFields();
     }
 }
